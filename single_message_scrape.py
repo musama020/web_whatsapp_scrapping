@@ -1,10 +1,19 @@
 from botasaurus.browser import browser, Driver
+from botasaurus.user_agent import UserAgent
+from botasaurus.window_size import WindowSize
 import time
 
 TARGET_CONTACT = "Muhammad Saim Byteforge"
 SCROLL_UP_COUNT = 15
 
-@browser(profile="whatsapp")
+@browser(
+    profile="whatsapp",
+    # HASHED keeps the fingerprint consistent across every run for this profile.
+    # An inconsistent user agent between sessions is the usual cause of WhatsApp's
+    # "A database error occurred on your browser. Please relink your device." error.
+    user_agent=UserAgent.HASHED,
+    window_size=WindowSize.HASHED,
+)
 def scrape_whatsapp(driver: Driver, data):
     driver.get("https://web.whatsapp.com")
 
@@ -28,14 +37,56 @@ def scrape_whatsapp(driver: Driver, data):
 
     print(f"Searching for {TARGET_CONTACT}...")
 
-    first_result = driver.select('div.x1iyjqo2', wait=5)
-    if first_result:
-        print(f"Found contact, clicking...")
-        first_result.click()
-        time.sleep(3)
-    else:
+    # Click the search-result row by matching the contact's name. The previous
+    # approach (div.x1iyjqo2) found an element but clicking it did not open the
+    # chat. Here we find the span[title=<name>] and click its clickable parent row.
+    click_js = r"""
+    var target = args.name;
+    var spans = document.querySelectorAll('span[title]');
+    for (var i = 0; i < spans.length; i++) {
+        var t = spans[i].getAttribute('title') || '';
+        if (t === target || t.indexOf(target) !== -1) {
+            var row = spans[i].closest('div[role="listitem"]')
+                   || spans[i].closest('[role="button"]')
+                   || spans[i].closest('div[tabindex]');
+            if (row) { row.click(); return 'CLICKED:' + t; }
+        }
+    }
+    return 'NOT_FOUND';
+    """
+    click_result = driver.run_js(click_js, {"name": TARGET_CONTACT})
+    print(f"Found contact, click result: {click_result}")
+
+    if click_result == "NOT_FOUND":
         print("Could not find contact in search results")
         return None
+
+    time.sleep(3)
+
+    # Verify the conversation actually opened (header shows the contact name).
+    header_text = driver.run_js(
+        "var h = document.querySelector('header');"
+        "return h ? h.innerText : '';"
+    )
+    print(f"Header after click: {header_text!r}")
+    if TARGET_CONTACT not in (header_text or ""):
+        # Fallback: press Enter in the search box to open the first result.
+        print("Chat not open yet — pressing Enter in search box as fallback...")
+        driver.run_js(
+            "var s = document.querySelector('div[contenteditable=\"true\"][data-tab=\"3\"]')"
+            " || document.querySelector('input[placeholder=\"Search or start a new chat\"]');"
+            "if (s) { s.focus(); }"
+        )
+        time.sleep(1)
+        driver.run_js(
+            "var ev = new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true});"
+            "(document.activeElement || document.body).dispatchEvent(ev);"
+        )
+        time.sleep(3)
+        header_text = driver.run_js(
+            "var h = document.querySelector('header'); return h ? h.innerText : '';"
+        )
+        print(f"Header after fallback: {header_text!r}")
 
     print("Chat opened. Pausing for inspection...")
     driver.prompt()
